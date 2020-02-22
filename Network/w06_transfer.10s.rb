@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 
 # <bitbar.title>Speedwifi-next W06 transfer amount during 1day</bitbar.title>
-# <bitbar.version>1.0</bitbar.version>
+# <bitbar.version>1.0.1</bitbar.version>
 # <bitbar.author>positrium</bitbar.author>
 # <bitbar.author.github>positrium</bitbar.author.github>
 # <bitbar.desc>show Speedwifi-next w06 transfer amount during 1day for bitbar.</bitbar.desc>
@@ -12,17 +12,10 @@
 require 'open-uri'
 require 'nokogiri'
 
-class TransferAmount
-	def initialize
-		@has_error = false
+class TransferState
+	def initialize(url='http://speedwifi-next.home/api/monitoring/statistics_3days')
 
-		@scale = {
-			kb: 1024,
-			mb: 1024 * 1024,
-			gb: 1024 * 1024 * 1024,
-			tb: 1024 * 1024 * 1024 * 1024
-		}
-		@scale.freeze
+		@has_error = false
 
 		@payload = {
 			yesterday_download: -9,
@@ -35,7 +28,7 @@ class TransferAmount
 			last_clear_time_3days: -9
 		}
 
-		@doc = Nokogiri.HTML(open("http://speedwifi-next.home/api/monitoring/statistics_3days"))
+		@doc = Nokogiri.HTML(URI.open(url))
 		@doc.xpath('//response/*').each do |e|
 			case e.name
 			when 'toyestodaydownload'
@@ -61,22 +54,13 @@ class TransferAmount
 		@has_error = true
 	end
 
-	def yesterday_data_usage
-		yesterday_data = @payload[:yesterday_download].to_i + @payload[:yesterday_upload].to_i
 
-		scale = transfer_scale(yesterday_data)
-		yesterday_usage = ( yesterday_data.to_f / scale[:size] ).round(2)
-
-		{amount: yesterday_usage, label: scale[:label], percentage: yesterday_usage / 10.00 * 100}
+	def today_usage
+		@payload[:today_download].to_i + @payload[:today_upload].to_i
 	end
 
-	def today_data_usage
-		today_data = @payload[:today_download].to_i + @payload[:today_upload].to_i
-
-		scale = transfer_scale(today_data)
-		today_usage = ( today_data.to_f / scale[:size] ).round(2)
-
-		{amount: today_usage, label: scale[:label], percentage: today_usage / 10.00 * 100}
+	def yesterday_usage
+		@payload[:yesterday_download].to_i + @payload[:yesterday_upload].to_i
 	end
 
 	def limited?
@@ -89,113 +73,94 @@ class TransferAmount
 	def has_error?
 		@has_error
 	end
+end
 
-	def scale_down(value)
-		value * 1024
+class ViewState
+
+	def initialize(amount, symbols={over: "x", warn: "!", ok: "o", limited: "-"}, limited=false)
+		@amount = amount.freeze
+		@percentage = ((amount.to_f / (10*1024*1024*1024).to_f) * 100).freeze
+		@symbols = symbols.freeze
+		@limited = limited.freeze
+
+		@max_usage = (1024*1024*1024*10).freeze
+		@scale = {
+			mb: 1024 * 1024,
+			gb: 1024 * 1024 * 1024,
+			tb: 1024 * 1024 * 1024 * 1024
+		}.freeze
 	end
 
-	private
-
-	def transfer_scale(byte)
-		scale_info = {size: 0, label: ''}
-
-		if @scale[:mb] > byte
-			scale_info[:size] = @scale[:kb]
-			scale_info[:label] = 'KB'
-		elsif @scale[:gb] > byte
-			scale_info[:size] = @scale[:mb]
-			scale_info[:label] = 'MB'
-		elsif @scale[:tb] > byte
-			scale_info[:size] = @scale[:gb]
-			scale_info[:label] = 'GB'
+	def sign
+		if @limited
+			@symbols[:limited]
+		elsif @percentage < 70.0
+			@symbols[:ok]
+		elsif @percentage < 100.0
+			@symbols[:warn]
 		else
-			scale_info[:size] = @scale[:tb]
-			scale_info[:label] = 'TB'
+			@symbols[:over]
 		end
-
-		scale_info
 	end
 
-end
-
-class WarningDetector
-	attr_reader :sign, :amount
-
-	def initialize(amount, percentage, symbols={over: "x", warn: "!", ok: "o", limited: "-"}, limited=false)
-		@amount = amount.round(2)
-		@percentage = percentage
-		@symbols = symbols
-		@limited = limited
+	def usage
+		value = detect_scale(@amount)
+		"#{value[:size]}#{value[:label]}"
 	end
 
-	def total_status
-		@status = :ok
-
-		if @percentage >= 100.00
-			@status = :over
-		elsif @percentage >= 70.00
-			@status = :warn
+	def left
+		left_value = @max_usage - @amount
+		value = (left_value/@scale[:mb].to_f).floor
+		if value >= 0
+			"#{value}MB"
+		else
+			"0MB"
 		end
-
-		@sign = @symbols[@status]
-		@status
-	end
-
-	def today_left_value
-		value = 0
-
-		case @status
-		when :warn
-			value = scale_down(10.00-@amount).round(2)
-			value = value.round
-		when :ok
-			value = scale_down(7.00-@amount).round(2)
-			value = value.round
-		end
-
-		value = 0 if value < 1
-
-		value
 	end
 
 	private
 
-	def scale_down(n)
-		n * 1024
+	def detect_scale(byte)
+		info = {size: 0, label: ''}
+ 
+		if @scale[:gb] > byte
+			info = {size: (byte/@scale[:mb].to_f).floor(2), label: 'MB'}
+		elsif @scale[:tb] > byte
+			info = {size: (byte/@scale[:gb].to_f).floor(2), label: 'GB'}
+		end
+
+		info
 	end
 end
 
-a = TransferAmount.new
+transfer = TransferState.new
 
-if a.has_error?
+if transfer.has_error?
 	puts "<!> connect to w06"
 
 else
-	symbols = {over: ":broken_heart:", warn: ":yellow_heart:", ok: ":green_heart:", limited: ":no_entry_sign:"}
-	symbols.freeze
+	symbols = {over: ":broken_heart:", warn: ":yellow_heart:", ok: ":green_heart:", limited: ":no_entry_sign:"}.freeze
 
-	usage = a.today_data_usage
-	wc = WarningDetector.new(usage[:amount], usage[:percentage], symbols, a.limited?)
-	wc.total_status
+	usage = transfer.today_usage
+	vt = ViewState.new(usage, symbols, transfer.limited?)
 
-	y_usage = a.yesterday_data_usage
-	wt = WarningDetector.new(y_usage[:amount], y_usage[:percentage], symbols, false)
-	wt.total_status
+	y_usage = transfer.yesterday_usage
+	vy = ViewState.new(y_usage, symbols, false)
 
-	puts "#{wc.sign}#{wc.today_left_value}MB(#{wc.amount}#{usage[:label]})"
+	puts "#{vt.sign}#{vt.left}(#{vt.usage})"
 	puts "---"
 	puts "admin page|href=http://speedwifi-next.home"
 	puts "hardware page|href=https://www.uqwimax.jp/wimax/products/w06/"
 	puts "---"
 	puts "until today usage"
-	puts "#{wc.sign}#{wc.amount}#{usage[:label]}"
+	puts "#{vt.sign}#{vt.usage}"
 	puts "--#{symbols[:limited]} restricted now"
 	puts "--#{symbols[:over]} over 10GB (100%)"
 	puts "--#{symbols[:warn]} over  7GB ( 70%)"
 	puts "--#{symbols[:ok]} less 7GB"
 	puts "--today + 1 day ago + 2 days ago"
 	puts "until yesterday usage"
-	puts "#{wt.sign}#{wt.amount}#{y_usage[:label]}"
+	puts "#{vy.sign}#{vy.usage}"
 	puts "--#{symbols[:over]} over 10GB (100%)"
 	puts "--#{symbols[:warn]} over  7GB ( 70%)"
 	puts "--#{symbols[:ok]} less  7GB"
